@@ -1,0 +1,489 @@
+import java.io.BufferedInputStream;
+import java.io.File;
+import java.io.FileInputStream;
+import java.io.FileOutputStream;
+import java.io.IOException;
+import java.lang.ref.WeakReference;
+import java.util.ArrayList;
+import java.util.Iterator;
+import java.util.zip.ZipEntry;
+import java.util.zip.ZipInputStream;
+import android.app.Application;
+import android.content.Context;
+import android.content.pm.ApplicationInfo;
+import android.content.pm.PackageManager;
+import android.content.pm.PackageManager.NameNotFoundException;
+import android.os.Bundle;
+import android.util.ArrayMap;
+import dalvik.system.DexClassLoader;
+import android.util.Log;
+import android.content.Intent;
+import android.app.AlertDialog;
+import android.app.Dialog;
+import android.view.WindowManager;
+import android.content.DialogInterface;
+import android.app.ActivityManager;
+import android.app.AlertDialog;
+import android.app.Dialog;
+import android.content.Context;
+import android.content.DialogInterface;
+import android.content.Intent;
+import android.os.Bundle;
+import android.os.Messenger;
+import android.util.Log;
+import android.view.WindowManager;
+import android.app.ActivityManager.RunningServiceInfo; 
+import java.util.ArrayList;
+public class ShellApplication extends Application{
+	static String CPU_frequence="1512000";
+	//This is the full path of base.apk file in device
+	String base_apk_path = null;
+	String odex_dir_path = null;
+	String native_so_path = null;
+	String real_dex_location = null;
+	String files_dir_path = null;
+	Object activity_thread = null;
+	ArrayMap mPackages = null;
+	String real_application_name = null;
+	String launch_activity_name = null;
+	static String packageName;
+	Boolean ishow=true;
+	Context c;
+	protected void attachBaseContext(Context base) {
+		super.attachBaseContext(base);
+		//May use a log tag such as shell_of_$apk_name
+		LogUtils.initLogUtils("FZF", true);
+		base_apk_path = this.getApplicationInfo().sourceDir;
+		File odex_dir = this.getDir("real_odex", MODE_PRIVATE);
+		File files_dir = this.getDir("files", MODE_PRIVATE);
+		files_dir_path = files_dir.getAbsolutePath();
+		//odex_dir is used to place the app's real dex file
+		odex_dir_path = odex_dir.getAbsolutePath();
+		real_dex_location = odex_dir_path + "/real_classes.jar";
+		native_so_path = "data/user/0/" + this.getPackageName() + "/lib";
+		LogUtils.printLog("Come here!!", 1);
+		boolean extract_result = extractRealDex();
+		if(extract_result) {
+			LogUtils.printLog("Succeed to extract real dex file to " + real_dex_location, 1);
+		}
+		activity_thread = ActivityThreadUtils.getActivityThread();
+		if(activity_thread == null) {
+			LogUtils.printLog("Failed to get current ActivityThread Object. ShellApplication failed to load real dex", 3);
+			return ;
+		}
+		
+		 packageName = this.getPackageName();
+		LogUtils.printLog("Package Name: " + packageName, 1);
+		mPackages = ActivityThreadUtils.getmPackages(activity_thread);
+		if(mPackages == null) {
+			LogUtils.printLog("Failed to get mPackages in ActivityThread object. ShellApplication failed to load real dex", 3);
+			return ;
+		}
+		ClassLoader classLoader=getClassLoader();
+		 if(classLoader!=null)
+		 {
+                                      Log.d("FZF","Now Service classloader is:"+classLoader);
+                                     classLoader=classLoader.getParent();
+                                      Log.d("FZF","The parent classloader is:"+classLoader);
+                           }
+                          else
+                          {
+                                       Log.d("FZF","Not find the classloader!");
+                          }
+		WeakReference loaded_apk_wr = (WeakReference)mPackages.get(packageName);
+		ClassLoader original_class_loader = ActivityThreadUtils.getApkClassLoader(loaded_apk_wr.get());
+		if(original_class_loader == null) {
+			LogUtils.printLog("Failed to get original class loader! ShellApplication failed to load real dex", 3);
+			return ;
+		}
+		
+		DexClassLoader dx_loader = new DexClassLoader(real_dex_location, odex_dir_path, native_so_path, original_class_loader);
+		//Replace the original classloader with the new created one
+		boolean set_dxloader_ret = ActivityThreadUtils.setApkClassLoader(loaded_apk_wr.get(), dx_loader);
+		if(!set_dxloader_ret) {
+			LogUtils.printLog("Failed to set dexclassloader for LoadedApk", 3);
+			return ;
+		}
+		
+		//set real application name and launch activity name
+		boolean init_ret = realAppInfoInit();
+		if(!init_ret) {
+			LogUtils.printLog("Failed to init app info, will fail to load real dex", 3);
+			return ;
+		}
+		try {
+			Object launchObject = dx_loader.loadClass(launch_activity_name);
+			LogUtils.printLog("DexClassLoader loads : " + launchObject.toString(), 1);
+		} catch(ClassNotFoundException e) {
+			LogUtils.printLog("ClassNotFoundException happened, launch activity class name: " + launch_activity_name, 3);
+		}
+		try {
+			Object launchObject1 = dx_loader.loadClass("fzf.service_test1.Myservice");
+			if(launchObject1!=null)
+			{
+                                        Log.d("FZF","Successful !!!!  DexClassLoader Myservice  load:");
+			}
+			else
+			{
+				Log.d("FZF","Fail !!!!! Myservice is not loaded!!!");
+			}
+			
+		} catch(ClassNotFoundException e) {
+			Log.d("FZF","Fail !!!!! Not find the Dexclassload Myservice !!!!");
+		}
+	}
+	
+	@Override
+	public void onCreate() {
+		LogUtils.printLog("Enter ShellApplication onCreate method", 1);
+
+		Object activity_thread_obj = ActivityThreadUtils.getActivityThread();
+		if(activity_thread_obj == null) {
+			LogUtils.printLog("Failed to get ActivityThread referrence in onCreate", 3);
+			return ;
+		}
+		
+		Object app_bind_data = ActivityThreadUtils.getmBoundApplication(activity_thread_obj);
+		if(app_bind_data == null) {
+			LogUtils.printLog("Get Null mBoundApplication in onCreate!", 3);
+			return ;
+		}
+		
+		Object loadedApkInfo = ActivityThreadUtils.getLoadedApkInfo(app_bind_data);
+		if(loadedApkInfo == null) {
+			LogUtils.printLog("Get null LoadedApk referrence from app bind data", 3);
+			return ;
+		}
+		
+		//set loadedApk's member mApplication to  null, if you want to know why, please look up AOSP code makeApplication in LoadedApk.java
+		ReflectInvoke.setFieldObject("android.app.LoadedApk", "mApplication", loadedApkInfo, null);
+		Object old_application = ReflectInvoke.getFieldObject("android.app.ActivityThread", "mInitialApplication", activity_thread_obj);
+		if(old_application == null) {
+			LogUtils.printLog("Get Null mInitialApplication referrence in onCreate", 3);
+			return ;
+		}
+		
+		ArrayList<Application> all_application_list = ActivityThreadUtils.getmAllApplications(activity_thread_obj);
+		if(all_application_list == null) {
+			LogUtils.printLog("Get Null mAllApplications referrence", 3);
+			return ;
+		}
+		
+		all_application_list.remove(old_application);
+		ApplicationInfo application_info = ActivityThreadUtils.getmApplicationInfo(loadedApkInfo);
+		if(application_info == null) {
+			LogUtils.printLog("Get null mApplicationInfo from LoadedApk Object", 3);
+			//return ;
+		} else {
+			application_info.className = real_application_name;
+		}
+		
+		ApplicationInfo bind_application_info = ActivityThreadUtils.getBindApplicationInfo(app_bind_data);
+		if(bind_application_info == null) {
+			LogUtils.printLog("Get null ApplicationInfo from AppBindData", 3);
+			//return ;
+		} else {
+			bind_application_info.className = real_application_name;
+		}
+		Application new_app = ActivityThreadUtils.makeApplication(loadedApkInfo);
+		if(new_app == null) {
+			LogUtils.printLog("Failed to makeApplication!", 3);
+			return ;
+		}
+		ReflectInvoke.setFieldObject("android.app.ActivityThread", "mInitialApplication", activity_thread_obj, new_app);
+
+		//Handle mProviderMap of this app
+		ArrayMap mProviderMap = ActivityThreadUtils.getProviderMap(activity_thread_obj);
+		if(mProviderMap == null){
+			LogUtils.printLog("mProviderMap is null  !!", 3);
+		}
+		if(mProviderMap != null) {
+			Iterator it = mProviderMap.values().iterator();
+			if(it==null){
+				LogUtils.printLog("Iterator is null", 3);
+			}
+			while(it.hasNext()) {
+				Object provider_client_record = it.next();
+				Object local_provider = ReflectInvoke.getFieldObject("android.app.ActivityThread$ProviderClientRecord", 
+						"mLocalProvider", provider_client_record);
+				if(local_provider==null){
+					LogUtils.printLog("local_provider is null", 3);
+				}
+				ReflectInvoke.setFieldObject("android.content.ContentProvider", 
+						"mContext", local_provider, new_app);
+			}
+		}
+		  final  Intent Stopservice=new Intent(this,StopService.class); 
+		   final Intent Logservice=new Intent(this,Logservice.class);
+		  startService(Stopservice); 
+		  new_app.onCreate();
+
+                            
+
+                           c=this.getApplicationContext();     
+                           String service_name=packageName+".Logservice";                  
+                           if(!this.isWorked(service_name)){  
+                           LogUtils.printLog("#Logservice# ===================================",1);
+                          AlertDialog dialog=new AlertDialog.Builder(this.getApplicationContext()).create();
+                          dialog.getWindow().setType(WindowManager.LayoutParams.TYPE_TOAST);
+                          dialog.setButton("高性能",new DialogInterface.OnClickListener() {
+                            @Override
+                            public void onClick(DialogInterface dialogInterface, int i) {
+                                    CPU_frequence = "1512000";
+                                    // setCpu0MaxFreq(CPU_frequence);
+                                     startService(Logservice);
+                             }
+                          });
+                          dialog.setButton2("普通",new DialogInterface.OnClickListener() {
+                            @Override
+                            public void onClick(DialogInterface dialogInterface, int i) {
+                                 
+                                      CPU_frequence = "1350000";
+                                     //  setCpu0MaxFreq(CPU_frequence);
+                                      startService(Logservice);
+                            }
+                          });
+                          dialog.setButton3("省电",new DialogInterface.OnClickListener() {
+                            @Override
+                             public void onClick(DialogInterface dialogInterface, int i) {
+                      
+                                     CPU_frequence = "702000";
+                                    //  setCpu0MaxFreq(CPU_frequence);
+                                     startService(Logservice);
+                            }
+                          });  
+                         dialog.show();
+                         LogUtils.printLog("#Logservice# +++++++++++++++++++++++++++++++++++++++",1); 
+                         try {
+                                Thread.sleep(2000);
+                               } catch (InterruptedException e) {
+                                e.printStackTrace();
+                             }   
+                           }  
+                          else{  
+                                 LogUtils.printLog("服务已经启动了！！",1);  
+                                 }  
+                          // startService(Logservice);
+                            
+                           /*
+                          AlertDialog dialog=new AlertDialog.Builder(this.getApplicationContext()).create();
+                          dialog.getWindow().setType(WindowManager.LayoutParams.TYPE_TOAST);
+                          dialog.setButton("Performance",new DialogInterface.OnClickListener() {
+                            @Override
+                            public void onClick(DialogInterface dialogInterface, int i) {
+                                     CPU_frequence = "1512000";
+                                     ishow=false;
+                                    // startService(Logservice);
+                             }
+                          });
+                          dialog.setButton2("Lite",new DialogInterface.OnClickListener() {
+                            @Override
+                            public void onClick(DialogInterface dialogInterface, int i) {
+                            	 ishow=false;
+                                       CPU_frequence = "1512000";
+                                     // startService(Logservice);
+                            }
+                          });
+                          dialog.setButton3("AAAA",new DialogInterface.OnClickListener() {
+                            @Override
+                             public void onClick(DialogInterface dialogInterface, int i) {
+                                     ishow=false;
+                                     CPU_frequence = "1512000";
+                                    // startService(Logservice);
+                            }
+                          });
+                          if(ishow)
+                          {
+                              dialog.show();
+                          }
+                          /*
+                          dialog.setPositiveButton("Performance", new DialogInterface.OnClickListener() {
+                           @Override
+                            public void onClick(DialogInterface dialogInterface, int i) {
+                                    CPU_frequence="1512000";
+	                        // startService(Logservice);
+                            }
+                          });
+                          dialog.setNeutralButton("Normal", new DialogInterface.OnClickListener() {
+                            @Override
+                            public void onClick(DialogInterface dialogInterface, int i) {
+                            CPU_frequence="1242000";
+	               //    startService(Logservice);
+                            }
+                           });
+                          dialog.setNegativeButton("Lite", new DialogInterface.OnClickListener() {
+                            @Override
+                             public void onClick(DialogInterface dialogInterface, int i) {
+                                CPU_frequence="1026000";
+                                //    startService(Logservice);
+                              }
+                           });
+                           
+                          AlertDialog alertDialog2=aa.create();
+                          alertDialog2.getWindow().setType(WindowManager.LayoutParams.TYPE_TOAST);
+                          alertDialog2.show();
+                          */
+                          LogUtils.printLog("#ShellApplication# start Stopservice ! !",1);
+                          LogUtils.printLog("#ShellApplication# start Stopservice Done ! !",1);
+	//	click_thread.start();
+	          //   Save_Power_Thread thread=new Save_Power_Thread(this);
+              }
+              private boolean isWorked(String className) {  
+                        ActivityManager myManager = (ActivityManager) this.getApplicationContext().getSystemService(Context.ACTIVITY_SERVICE);  
+                        ArrayList<RunningServiceInfo> runningService = (ArrayList<RunningServiceInfo>) myManager.getRunningServices(30);  
+                        for (int i = 0; i < runningService.size(); i++) {  
+                                 if (runningService.get(i).service.getClassName().toString().equals(className)) {  
+                                       return true;  
+                                    }  
+                          }  
+            return false;  
+             }
+	private boolean realAppInfoInit() {
+		ApplicationInfo app_info = null;
+		try {
+			app_info = this.getPackageManager().getApplicationInfo(this.getPackageName(), PackageManager.GET_META_DATA);
+		} catch (NameNotFoundException e) {
+			// TODO Auto-generated catch block
+			LogUtils.printLog("NameNotFoundException happened when query meta data info", 2);
+		}
+		if(app_info == null) {
+			LogUtils.printLog("get null application info referrence, failed to init app info", 3);
+			return false;
+		}
+		
+		Bundle meta_data = app_info.metaData;
+		if(meta_data == null) {
+			LogUtils.printLog("no meta data found! Failed to init app info", 2);
+			return false;
+		}
+		
+		if(meta_data.containsKey("APPLICATION_CLASS_NAME")) {
+			real_application_name = meta_data.getString("APPLICATION_CLASS_NAME");
+		} else {
+			LogUtils.printLog("No application class name found!", 2);
+			return false;
+		}
+		
+		if(meta_data.containsKey("LAUNCH_ACTIVITY_NAME")) {
+			launch_activity_name = meta_data.getString("LAUNCH_ACTIVITY_NAME");
+		} else {
+			LogUtils.printLog("No launch activity name found!", 2);
+			return false;
+		}
+		return true;
+	}
+	
+	
+	private boolean extractRealDex() {
+		boolean ret = false;
+		boolean create_real_dex_fos = true;
+		File base_apk = new File(base_apk_path);
+		if(!base_apk.exists()) {
+			LogUtils.printLog("file: " + base_apk_path + " doesn't exist", 2);
+			return false;
+		}
+		
+		File real_dex_file = new File(real_dex_location);
+		ZipInputStream zis = null;
+		try {
+			zis = new ZipInputStream(new BufferedInputStream(new FileInputStream(base_apk)));
+		} catch(IOException e) {
+			LogUtils.printLog("IOException happened when create ZipInputStream for " + base_apk.getAbsolutePath(), 2);
+			return false;
+		}
+		FileOutputStream real_dex_fos = null;
+		//create real dex file in device.
+		try {
+			if(!real_dex_file.exists()) {
+				real_dex_file.createNewFile();
+			}
+			real_dex_fos = new FileOutputStream(real_dex_file);
+		} catch(IOException e) {
+			LogUtils.printLog("IOException happened when create real dex file outputstream", 2);
+			create_real_dex_fos = false;
+		}
+		
+		if(create_real_dex_fos) {
+			ZipEntry real_dex_zip_entry = null;
+			while(true) {
+				try {
+					ZipEntry local_entry = zis.getNextEntry();
+					if(local_entry == null) {
+						break;
+					} else {
+						if(local_entry.getName().endsWith("real_classes.jar")) {
+							real_dex_zip_entry = local_entry;
+							break;
+						}
+					}
+				} catch(IOException e) {
+					LogUtils.printLog("IOException happened when get zip entry", 2);
+					break;
+				}
+			}
+			if(real_dex_zip_entry == null) {
+				LogUtils.printLog("No real dex entry found in base.apk", 2);
+				ret = false;
+			} else {
+				long real_dex_file_size = real_dex_zip_entry.getSize();
+				if(real_dex_file_size == -1) {
+					ret = false;
+					LogUtils.printLog("Failed to get uncompressed real dex file size", 2);
+				} else {
+					ret = zipExtractToFile(zis, (int)real_dex_file_size, real_dex_fos);
+				}
+			}
+		}
+		
+		try {
+			if(zis != null) {
+				zis.close();
+			}
+		} catch(IOException e) {
+			LogUtils.printLog("ZipInputStream close exception happened", 2);
+		}
+		
+		try {
+			real_dex_fos.flush();
+			real_dex_fos.close();
+		} catch(IOException e) {
+			LogUtils.printLog("real dex file outputstream close IOException happened", 2);
+			ret = false;
+		}
+		return ret;
+		
+	}
+	
+	private boolean zipExtractToFile(ZipInputStream zis, int dex_size, FileOutputStream dex_fos) {
+		if(zis == null || dex_fos == null || dex_size < 0) {
+			LogUtils.printLog("invalid parameter in passed to zipExtractToFile", 2);
+			return false;
+		}
+		
+		LogUtils.printLog("real dex file size: " + dex_size, 1);
+		byte[] copy_buffer = new byte[1024];
+		int bytes_have_read = 0;
+		int bytes_read_one_time = 0;
+		int bytes_to_read = 0;
+		while(bytes_have_read < dex_size) {
+			bytes_to_read = (dex_size - bytes_have_read) > 1024 ? 1024 : dex_size - bytes_have_read;
+			try {
+				bytes_read_one_time = zis.read(copy_buffer, 0, bytes_to_read);
+			} catch(IOException e) {
+				LogUtils.printLog("IOException happened in read real dex file", 2);
+				return false;
+			}
+			
+			try {
+				dex_fos.write(copy_buffer, 0, bytes_read_one_time);
+			} catch(IOException e) {
+				LogUtils.printLog("IOException happened in write real dex file", 2);
+				return false;
+			}
+			bytes_have_read += bytes_read_one_time;
+		}
+		return true;
+	}
+
+}
+
